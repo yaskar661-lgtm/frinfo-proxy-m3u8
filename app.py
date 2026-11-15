@@ -36,7 +36,7 @@ def proxy_master():
     host_root = request.host_url.rstrip("/")  # Örn: http://127.0.0.1:5000
 
     # İçindeki alt m3u8 bağlantılarını host + proxy ile yeniden yaz
-    new_lines = []
+    processed_lines = []
     for line in playlist_content.splitlines():
       line = line.strip()
       if line and not line.startswith("#"):
