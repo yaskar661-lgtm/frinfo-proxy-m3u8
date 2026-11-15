@@ -34,36 +34,37 @@ def proxy_master():
         base_url = re.sub(r"[^/]+$", "", ORIGINAL_MASTER_URL)
         host_root = request.host_url.rstrip("/")  # Örn: http://127.0.0.1:5000
 
-        # İçindeki alt m3u8 bağlantılarını host + proxy ile yeniden yaz
         processed_lines = []
         for line in playlist_content.splitlines():
             line = line.strip()
-            if line and not line.startswith("#"):
+            if line:
+                # 1. Durum: Satır içinde URI=" veya URL=" barındıran etiketler (Örn: #EXT-X-MEDIA)
                 if "URI=" in line or "URL=" in line:
                     def fix_url(match):
                         prefix = match.group(1)  # Örn: URI=" veya URL=
                         val = match.group(2)     # İçindeki adres
-                        quote = match.group(3)   # Kapanış tırnağı (varsa)
+                        quote = match.group(3)   # Kapanış tırnağı
 
-                        # Eğer http:// veya https:// ile başlamıyorsa base_url ekle
+                        # Eğer relative (göreceli) linkse base_url ekle
                         if not val.startswith(("http://", "https://")):
                             val = base_url + val
 
-                        # İstediğiniz kural: Eğer belirli proxy adresiyle başlamıyorsa proxy sarmalayıcısı ekle
-                        proxy_prefix = "https://palxlendimgaliba1010.mywire.org/proxy.php?url="
+                        # Dış kaynaklı adresi kendi Flask proxy'mize yönlendir
+                        proxy_prefix = f"{host_root}/proxy?url="
                         if not val.startswith(proxy_prefix):
                             val = f"{host_root}/proxy?url={val}"
 
                         return f"{prefix}{val}{quote}"
 
-                    # Tırnaklı veya tırnaksız URI/URL yapılarını esnek bir şekilde yakalar
+                    # URI veya URL parametrelerini regex ile yakalayıp değiştir
                     line = re.sub(r'((?:URI|URL)=["\']?)([^"\']*)(["\']?)', fix_url, line)
-                else:
-                    # # ile başlamayan normal segment satırları (.ts, .m4s vb.)
+
+                # 2. Durum: # ile başlamayan normal stream bant genişliği/çözünürlük linkleri
+                elif not line.startswith("#"):
                     if not line.startswith(("http://", "https://")):
                         line = base_url + line
                     
-                    proxy_prefix = "https://palxlendimgaliba1010.mywire.org/proxy.php?url="
+                    proxy_prefix = f"{host_root}/proxy?url="
                     if not line.startswith(proxy_prefix):
                         line = f"{host_root}/proxy?url={line}"
 
