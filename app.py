@@ -2,28 +2,30 @@ from flask import Flask, Response, request
 import re
 import requests
 import urllib3
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 
 # SSL uyarılarını gizle
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Gerçek tarayıcı (Chrome) header'ları - engelleri aşmak için
 TARGET_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.france.tv/",
+    "Origin": "https://www.france.tv/"
 }
 
-# Orijinal master kaynak
-ORIGINAL_MASTER_URL = "https://palxlendimgaliba1010.mywire.org/proxy.php?url=https://raw.githubusercontent.com/Paradise-91/ParaTV/refs/heads/main/streams/francetv/franceinfo.m3u8"
-
-UPSTREAM_PROXY_ROOT = "https://palxlendimgaliba1010.mywire.org/proxy.php?url="
+# Doğrudan GitHub üzerindeki ham master m3u8 adresi (arada mywire.org yok)
+ORIGINAL_MASTER_URL = "https://raw.githubusercontent.com/Paradise-91/ParaTV/refs/heads/main/streams/francetv/franceinfo.m3u8"
 
 def clean_and_proxy_url(raw_url, host_root):
     """
-    URL'lerin palxlendimgaliba1010.mywire.org/proxy.php?url= yapısını korumasını 
-    ve yerel Flask proxy'mize (host_root) uygun şekilde sarmalanmasını sağlar.
+    Tüm alt URL'leri temizler ve doğrudan Flask proxy adresimize (host_root/proxy?url=...) bağlar.
     """
-    # 1. En içteki gerçek hedef URL'yi bulmak için proxy katmanlarını temizleyelim ama mywire.org'u referans alacağız
+    # İç içe geçmiş olası proxy parametrelerini ayıkla
     clean_target = raw_url
     while "url=" in clean_target:
         parsed = urlparse(clean_target)
@@ -33,15 +35,12 @@ def clean_and_proxy_url(raw_url, host_root):
         else:
             break
 
-    # 2. Eğer zaten yerel proxy prefiximiz ile başlıyorsa tekrar ekleme
+    # Zaten bizim proxy prefiximizle başlıyorsa tekrar ekleme
     proxy_prefix = f"{host_root}/proxy?url="
     if raw_url.startswith(proxy_prefix):
         return raw_url
 
-    # 3. mywire.org sarmalını ve URL encoding'i zorunlu olarak uyguluyoruz
-    # Format: http://127.0.0.1:5000/proxy?url=https://palxlendimgaliba1010.mywire.org/proxy.php?url=ENCODED_TARGET
-    wrapped_upstream = f"{UPSTREAM_PROXY_ROOT}{quote(clean_target, safe='')}"
-    return f"{proxy_prefix}{wrapped_upstream}"
+    return f"{proxy_prefix}{clean_target}"
 
 @app.route("/master.m3u8")
 def proxy_master():
@@ -62,7 +61,7 @@ def proxy_master():
         for line in playlist_content.splitlines():
             line = line.strip()
             if line:
-                # 1. Durum: #EXT-X-MEDIA gibi URI içeren etiketler (Ses ve Altyazılar)
+                # 1. URI veya URL içeren etiketler (Ses ve altyazılar)
                 if "URI=" in line or "URL=" in line:
                     def fix_url(match):
                         prefix = match.group(1)
@@ -77,7 +76,7 @@ def proxy_master():
 
                     line = re.sub(r'((?:URI|URL)=["\']?)([^"\']*)(["\']?)', fix_url, line)
 
-                # 2. Durum: Normal stream bant genişliği/çözünürlük linkleri (# ile başlamayanlar)
+                # 2. Akış satırları (# ile başlamayanlar)
                 elif not line.startswith("#"):
                     if not line.startswith(("http://", "https://")):
                         line = base_url + line
@@ -102,6 +101,7 @@ def proxy_media():
         return "URL belirtilmedi", 400
 
     try:
+        # Chrome header'ları ile hedef adrese istek atıyoruz
         req = requests.get(
             target_url,
             headers=TARGET_HEADERS,
@@ -113,7 +113,7 @@ def proxy_media():
 
         content_type = req.headers.get("Content-Type", "application/octet-stream")
 
-        # Alt m3u8 dosyası kontrolü
+        # Eğer gelen içerik alt bir m3u8 playlist dosyası ise içerisindeki segment linklerini de günçelle
         if (
             "application/vnd.apple.mpegurl" in content_type
             or "audio/mpegurl" in content_type
@@ -154,7 +154,7 @@ def proxy_media():
             updated_playlist = "\n".join(new_lines)
             return Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
 
-        # Segment verilerini (.ts, .m4s) doğrudan stream et
+        # Medya parçalarını (.ts, .m4s) doğrudan stream et
         return Response(
             req.iter_content(chunk_size=131072),
             status=req.status_code,
