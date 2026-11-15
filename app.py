@@ -40,13 +40,30 @@ def proxy_master():
     for line in playlist_content.splitlines():
       line = line.strip()
       if line and not line.startswith("#"):
-        full_url = base_url + line
-        proxied_url = f"{host_root}/proxy?url={full_url}"
-        new_lines.append(proxied_url)
-      else:
-        new_lines.append(line)
+    if "URI=" in line or "URL=" in line:
 
-    updated_playlist = "\n".join(new_lines)
+      def fix_url(match):
+        prefix = match.group(1)  # Örn: URI=" veya URL=
+        val = match.group(2)  # İçindeki adres
+        quote = match.group(3)  # Kapanış tırnağı (varsa)
+
+        # Eğer http:// veya https:// ile başlamıyorsa base_url ekle
+        if not val.startswith(("http://", "https://")):
+          val = base_url + val
+
+        return f"{prefix}{val}{quote}"
+
+      # Tırnaklı veya tırnaksız URI/URL yapılarını esnek bir şekilde yakalar
+      line = re.sub(r'((?:URI|URL)=["\']?)([^"\']*)(["\']?)', fix_url, line)
+
+    processed_lines.append(line)
+  else:
+    # # ile başlamayan satırlar (ts, m4s veya alt m3u8 segmentleri)
+    if not line.startswith(("http://", "https://")):
+      line = base_url + line
+    processed_lines.append(line)
+      
+    updated_playlist = "\n".join(processed_lines)
     return Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
 
   except requests.exceptions.RequestException as e:
