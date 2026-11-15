@@ -2,7 +2,8 @@ from flask import Flask, Response, request
 import re
 import requests
 import urllib3
-from urllib.parse import urlparse, parse_qs, unquote, quote
+import time
+from urllib.parse import urlparse, parse_qs, quote, unquote
 
 app = Flask(__name__)
 
@@ -17,24 +18,39 @@ TARGET_HEADERS = {
     "Origin": "https://www.france.tv/"
 }
 
-# Taze Location / yönlendirme sağlayan kaynak
 ORIGINAL_MASTER_URL = "https://tvradiozap.eu/tools/ft-m3u8.php/franceinfo.m3u8"
+
+# Önbellek (Cache) Değişkenleri (5 Dakika TTL)
+cache = {
+    "url": None,
+    "timestamp": 0
+}
+CACHE_TTL = 300  
 
 def get_fresh_master_url():
     """
-    tvradiozap.eu veya benzeri kaynaktan güncel Location header'ını veya 
-    taze m3u8 adresini alır.
+    Taze master URL'yi önbellek süresi dolduysa yeniden çeker, 
+    aksi halde hafızdakini döndürerek dış servisi yormaz.
     """
+    global cache
+    current_time = time.time()
+    
+    if cache["url"] and (current_time - cache["timestamp"] < CACHE_TTL):
+        return cache["url"]
+
     try:
         resp = requests.get(ORIGINAL_MASTER_URL, headers=TARGET_HEADERS, allow_redirects=True, timeout=10, verify=False)
-        # Eğer doğrudan son m3u8 içeriği dönüyorsa veya yönlendirme verdiyse url'yi döndür
-        return resp.url if resp.status_code == 200 else ORIGINAL_MASTER_URL
+        fresh_url = resp.url if resp.status_code == 200 else ORIGINAL_MASTER_URL
+        
+        cache["url"] = fresh_url
+        cache["timestamp"] = current_time
+        return fresh_url
     except Exception:
-        return ORIGINAL_MASTER_URL
+        return cache["url"] if cache["url"] else ORIGINAL_MASTER_URL
 
 def clean_and_proxy_url(raw_url, host_root):
     """
-    URL'leri temizler ve Flask proxy adresimize bağlar. Boşluk ve imza bozulmalarını önler.
+    URL'leri temizler ve imza bütünlüğünü bozmadan Flask proxy adresimize bağlar.
     """
     clean_target = raw_url
     while "url=" in clean_target:
@@ -54,7 +70,6 @@ def clean_and_proxy_url(raw_url, host_root):
 @app.route("/master.m3u8")
 def proxy_master():
     try:
-        # Taze adresi alıyoruz
         target_url = get_fresh_master_url()
         
         resp = requests.get(
@@ -73,6 +88,7 @@ def proxy_master():
         for line in playlist_content.splitlines():
             line = line.strip()
             if line:
+                # 1. URI veya URL içeren etiketler (Ses ve altyazılar)
                 if "URI=" in line or "URL=" in line:
                     def fix_url(match):
                         prefix = match.group(1)
@@ -87,6 +103,7 @@ def proxy_master():
 
                     line = re.sub(r'((?:URI|URL)=["\']?)([^"\']*)(["\']?)', fix_url, line)
 
+                # 2. Akış satırları (# ile başlamayanlar)
                 elif not line.startswith("#"):
                     if not line.startswith(("http://", "https://")):
                         line = base_url + line
@@ -111,7 +128,7 @@ def proxy_media():
         return "URL belirtilmedi", 400
 
     try:
-        # URL kodlamasını düzgün çöz ama imza parametrelerinin bütünlüğünü koru
+        # Akamai imza parametrelerinin bozulmaması için çözümleme
         target_url = unquote(target_url)
 
         req = requests.get(
@@ -125,6 +142,7 @@ def proxy_media():
 
         content_type = req.headers.get("Content-Type", "application/octet-stream")
 
+        # Alt m3u8 dosyası kontrolü
         if (
             "application/vnd.apple.mpegurl" in content_type
             or "audio/mpegurl" in content_type
@@ -165,6 +183,7 @@ def proxy_media():
             updated_playlist = "\n".join(new_lines)
             return Response(updated_playlist, mimetype="application/vnd.apple.mpegurl")
 
+        # Medya parçalarını (.ts, .m4s) doğrudan stream et
         return Response(
             req.iter_content(chunk_size=131072),
             status=req.status_code,
